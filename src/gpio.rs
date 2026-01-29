@@ -1,88 +1,70 @@
-//! GPIO
+//! GPIO driver for F1C100S
 //!
-//! Pin can be configured as:
-//! - Floating Input
-//! - PullUp Input
-//! - PullDown Input
-//! - Analog Input
-//! - OpenDrain Output
-//! - PushPull Output
-//! - Alternate Function (input or output)
+//! F1C100S has 6 GPIO ports:
+//! - PA: 4 pins (PA0-PA3)
+//! - PB: 4 pins (PB0-PB3)
+//! - PC: 4 pins (PC0-PC3)
+//! - PD: 22 pins (PD0-PD21)
+//! - PE: 13 pins (PE0-PE12)
+//! - PF: 6 pins (PF0-PF5)
 //!
-//! Power On: Floating Input except for some Alternate Function
+//! Register layout per port (offset = port_num * 0x24):
+//! - CFG0: 0x00 (pins 0-7 config, 4 bits each)
+//! - CFG1: 0x04 (pins 8-15 config)
+//! - CFG2: 0x08 (pins 16-23 config)
+//! - CFG3: 0x0C (pins 24-31 config)
+//! - DATA: 0x10
+//! - DRV0: 0x14 (drive strength pins 0-15, 2 bits each)
+//! - DRV1: 0x18 (drive strength pins 16-31)
+//! - PUL0: 0x1C (pull config pins 0-15, 2 bits each)
+//! - PUL1: 0x20 (pull config pins 16-31)
 
 use core::convert::Infallible;
 
-use critical_section::CriticalSection;
-use pac::gpio::vals;
-
 use embassy_hal_internal::PeripheralType;
 
-use crate::{exti, impl_peripheral, pac, peripherals, Peri};
+use crate::{impl_peripheral, peripherals, Peri};
 
-/// Speed, for output mode
+/// PIO base address
+const PIO_BASE: usize = 0x01C2_0800;
+
+/// GPIO pin mode (3 bits in CFG register)
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+#[repr(u8)]
+pub enum PinMode {
+    Input = 0,
+    Output = 1,
+    Func2 = 2,
+    Func3 = 3,
+    Func4 = 4,
+    Func5 = 5,
+    Func6 = 6,
+    Disabled = 7,
+}
+
+/// Pull setting for a pin (2 bits in PUL register)
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Default)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum Speed {
-    /// 10MHz
-    Medium = 0b01,
-    /// 2MHz
-    Low = 0b10,
-    /// 50MHz
-    #[default]
-    High = 0b11,
-}
-
-#[cfg(any(gpio_v3, gpio_v0))]
-impl From<Speed> for vals::Mode {
-    fn from(value: Speed) -> Self {
-        use Speed::*;
-
-        match value {
-            Medium => vals::Mode::OUTPUT_10MHZ,
-            Low => vals::Mode::OUTPUT_2MHZ,
-            High => vals::Mode::OUTPUT_50MHZ,
-        }
-    }
-}
-
-#[cfg(gpio_x0)]
-impl From<Speed> for vals::Mode {
-    fn from(_value: Speed) -> Self {
-        vals::Mode::OUTPUT_50MHZ
-    }
-}
-
-/// Pull setting for an input.
-#[derive(Debug, Eq, PartialEq, Copy, Clone)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[repr(u8)]
 pub enum Pull {
-    None,
-    Up,
-    Down,
+    #[default]
+    None = 0,
+    Up = 1,
+    Down = 2,
 }
 
-impl From<Pull> for vals::Cnf {
-    fn from(value: Pull) -> Self {
-        match value {
-            Pull::None => vals::Cnf::FLOATING_IN__OPEN_DRAIN_OUT,
-            _ => vals::Cnf::PULL_IN__AF_PUSH_PULL_OUT,
-        }
-    }
+/// Drive strength level (2 bits in DRV register)
+#[derive(Debug, Eq, PartialEq, Copy, Clone, Default)]
+#[repr(u8)]
+pub enum DriveStrength {
+    Level0 = 0,
+    #[default]
+    Level1 = 1,
+    Level2 = 2,
+    Level3 = 3,
 }
 
-impl Pull {
-    #[inline]
-    fn to_cnf(&self) -> u8 {
-        match self {
-            Pull::None => 0b01,
-            _ => 0b10,
-        }
-    }
-}
-
+/// Logic level
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Level {
     Low,
     High,
@@ -90,94 +72,52 @@ pub enum Level {
 
 impl From<bool> for Level {
     fn from(val: bool) -> Self {
-        match val {
-            true => Self::High,
-            false => Self::Low,
-        }
-    }
-}
-
-impl From<u8> for Level {
-    fn from(val: u8) -> Self {
-        match val {
-            0 => Self::Low,
-            _ => Self::High,
+        if val {
+            Self::High
+        } else {
+            Self::Low
         }
     }
 }
 
 impl From<Level> for bool {
     fn from(level: Level) -> bool {
-        match level {
-            Level::Low => false,
-            Level::High => true,
-        }
+        matches!(level, Level::High)
     }
 }
 
-/// GPIO flexible pin.
-///
-/// This pin can either be a disconnected, input, or output pin, or both. The level register bit will remain
-/// set while not in output mode, so the pin's level will be 'remembered' when it is not in output
-/// mode.
+impl Default for Level {
+    fn default() -> Self {
+        Self::Low
+    }
+}
+
+/// Flexible GPIO pin that can be configured as input or output
 pub struct Flex<'d> {
-    pub(crate) pin: Peri<'d, AnyPin>,
+    pin: Peri<'d, AnyPin>,
 }
 
 impl<'d> Flex<'d> {
-    /// Wrap the pin in a `Flex`.
-    ///
-    /// The pin remains disconnected. The initial output level is unspecified, but can be changed
-    /// before the pin is put into output mode.
-    ///
     #[inline]
-    pub fn new(pin: Peri<'d, impl Pin>) -> Self {
-        // Pin will be in disconnected state.
+    pub fn new<P: Pin + Into<AnyPin>>(pin: Peri<'d, P>) -> Self {
         Self { pin: pin.into() }
     }
 
-    /// Put the pin into input mode.
     #[inline]
     pub fn set_as_input(&mut self, pull: Pull) {
-        critical_section::with(|_| {
-            self.pin.set_mode_cnf(vals::Mode::INPUT, pull.into());
-            self.pin.set_pull(pull);
-        });
+        self.pin.set_mode(PinMode::Input);
+        self.pin.set_pull(pull);
     }
 
-    /// Put the pin into output mode.
-    ///
-    /// The pin level will be whatever was set before (or low by default). If you want it to begin
-    /// at a specific level, call `set_high`/`set_low` on the pin first.
     #[inline]
-    pub fn set_as_output(&mut self, speed: Speed) {
-        critical_section::with(|_| {
-            self.pin.set_as_output(speed);
-        });
-    }
-
-    /// Put the pin into output mode with open drain.
-    ///
-    /// Pull resistor is disabled in this mode.
-    #[inline]
-    pub fn set_as_output_open_drain(&mut self, speed: Speed) {
-        // 通用开漏输出模式
-        #[cfg(not(gpio_x0))]
-        critical_section::with(|_| {
-            self.pin
-                .set_mode_cnf(speed.into(), vals::Cnf::FLOATING_IN__OPEN_DRAIN_OUT);
-        });
-        #[cfg(gpio_x0)]
-        critical_section::with(|_| {
-            self.pin
-                .set_mode_cnf(speed.into(), vals::Cnf::PULL_IN__AF_PUSH_PULL_OUT);
-            // FIXME: only i2c is auto set to open drain
-        });
+    pub fn set_as_output(&mut self, drive: DriveStrength) {
+        self.pin.set_mode(PinMode::Output);
+        self.pin.set_drive(drive);
     }
 
     #[inline]
     pub fn is_high(&self) -> bool {
-        self.pin.block().indr().read().idr(self.pin.pin() as usize)
+        self.pin.read_data()
     }
 
     #[inline]
@@ -191,45 +131,26 @@ impl<'d> Flex<'d> {
     }
 
     #[inline]
-    pub fn is_set_high(&self) -> bool {
-        self.pin.block().outdr().read().odr(self.pin.pin() as usize)
-    }
-
-    /// Is the output pin set as low?
-    #[inline]
-    pub fn is_set_low(&self) -> bool {
-        !self.is_set_high()
-    }
-
-    /// What level output is set to
-    #[inline]
-    pub fn get_output_level(&self) -> Level {
-        self.is_set_high().into()
-    }
-
-    #[inline]
     pub fn set_high(&mut self) {
-        self.pin.set_high();
+        self.pin.write_data(true);
     }
 
-    /// Set the output as low.
     #[inline]
     pub fn set_low(&mut self) {
-        self.pin.set_low();
+        self.pin.write_data(false);
     }
 
     #[inline]
     pub fn set_level(&mut self, level: Level) {
         match level {
-            Level::Low => self.pin.set_low(),
-            Level::High => self.pin.set_high(),
+            Level::Low => self.set_low(),
+            Level::High => self.set_high(),
         }
     }
 
-    /// Toggle pin output
     #[inline]
     pub fn toggle(&mut self) {
-        if self.is_set_low() {
+        if self.is_low() {
             self.set_high()
         } else {
             self.set_low()
@@ -237,372 +158,195 @@ impl<'d> Flex<'d> {
     }
 }
 
-/// GPIO input driver.
+/// Input pin
 pub struct Input<'d> {
-    pub(crate) pin: Flex<'d>,
+    pin: Flex<'d>,
 }
 
 impl<'d> Input<'d> {
-    /// Create GPIO input driver for a [Pin] with the provided [Pull] configuration.
     #[inline]
-    pub fn new(pin: Peri<'d, impl Pin>, pull: Pull) -> Self {
+    pub fn new<P: Pin + Into<AnyPin>>(pin: Peri<'d, P>, pull: Pull) -> Self {
         let mut pin = Flex::new(pin);
         pin.set_as_input(pull);
         Self { pin }
     }
 
-    /// Get whether the pin input level is high.
     #[inline]
     pub fn is_high(&self) -> bool {
         self.pin.is_high()
     }
 
-    /// Get whether the pin input level is low.
     #[inline]
     pub fn is_low(&self) -> bool {
         self.pin.is_low()
     }
 
-    /// Get the current pin input level.
     #[inline]
     pub fn get_level(&self) -> Level {
         self.pin.get_level()
     }
 }
 
-/// GPIO output driver.
-///
-/// Note that pins will **return to their floating state** when `Output` is dropped.
-/// If pins should retain their state indefinitely, either keep ownership of the
-/// `Output`, or pass it to [`core::mem::forget`].
+/// Output pin
 pub struct Output<'d> {
-    pub(crate) pin: Flex<'d>,
+    pin: Flex<'d>,
 }
 
 impl<'d> Output<'d> {
-    /// Create GPIO output driver for a [Pin] with the provided [Level] and [Speed] configuration.
     #[inline]
-    pub fn new(pin: Peri<'d, impl Pin>, initial_output: Level, speed: Speed) -> Self {
+    pub fn new<P: Pin + Into<AnyPin>>(pin: Peri<'d, P>, initial_output: Level, drive: DriveStrength) -> Self {
         let mut pin = Flex::new(pin);
         match initial_output {
             Level::High => pin.set_high(),
             Level::Low => pin.set_low(),
         }
-        pin.set_as_output(speed);
+        pin.set_as_output(drive);
         Self { pin }
     }
 
-    /// Set the output as high.
     #[inline]
     pub fn set_high(&mut self) {
         self.pin.set_high();
     }
 
-    /// Set the output as low.
     #[inline]
     pub fn set_low(&mut self) {
         self.pin.set_low();
     }
 
-    /// Set the output level.
     #[inline]
     pub fn set_level(&mut self, level: Level) {
         self.pin.set_level(level)
     }
 
-    /// Is the output pin set as high?
     #[inline]
     pub fn is_set_high(&self) -> bool {
-        self.pin.is_set_high()
+        self.pin.is_high()
     }
 
-    /// Is the output pin set as low?
     #[inline]
     pub fn is_set_low(&self) -> bool {
-        self.pin.is_set_low()
+        self.pin.is_low()
     }
 
-    /// What level output is set to
     #[inline]
     pub fn get_output_level(&self) -> Level {
-        self.pin.get_output_level()
+        self.pin.get_level()
     }
 
-    /// Toggle pin output
     #[inline]
     pub fn toggle(&mut self) {
         self.pin.toggle();
     }
 }
 
-/// GPIO output open-drain driver.
-///
-/// Note that pins will **return to their floating state** when `OutputOpenDrain` is dropped.
-/// If pins should retain their state indefinitely, either keep ownership of the
-/// `OutputOpenDrain`, or pass it to [`core::mem::forget`].
-pub struct OutputOpenDrain<'d> {
-    pub(crate) pin: Flex<'d>,
-}
-
-impl<'d> OutputOpenDrain<'d> {
-    /// Create a new GPIO open drain output driver for a [Pin] with the provided [Level] and [Speed], [Pull] configuration.
-    #[inline]
-    pub fn new(pin: Peri<'d, impl Pin>, initial_output: Level, speed: Speed) -> Self {
-        let mut pin = Flex::new(pin);
-
-        match initial_output {
-            Level::High => pin.set_high(),
-            Level::Low => pin.set_low(),
-        }
-
-        pin.set_as_output_open_drain(speed);
-        Self { pin }
-    }
-
-    /// Get whether the pin input level is high.
-    #[inline]
-    pub fn is_high(&self) -> bool {
-        !self.pin.is_low()
-    }
-
-    /// Get whether the pin input level is low.
-    #[inline]
-    pub fn is_low(&self) -> bool {
-        self.pin.is_low()
-    }
-
-    /// Get the current pin input level.
-    #[inline]
-    pub fn get_level(&self) -> Level {
-        self.pin.get_level()
-    }
-
-    /// Set the output as high.
-    #[inline]
-    pub fn set_high(&mut self) {
-        self.pin.set_high();
-    }
-
-    /// Set the output as low.
-    #[inline]
-    pub fn set_low(&mut self) {
-        self.pin.set_low();
-    }
-
-    /// Set the output level.
-    #[inline]
-    pub fn set_level(&mut self, level: Level) {
-        self.pin.set_level(level);
-    }
-
-    /// Get whether the output level is set to high.
-    #[inline]
-    pub fn is_set_high(&self) -> bool {
-        self.pin.is_set_high()
-    }
-
-    /// Get whether the output level is set to low.
-    #[inline]
-    pub fn is_set_low(&self) -> bool {
-        self.pin.is_set_low()
-    }
-
-    /// Get the current output level.
-    #[inline]
-    pub fn get_output_level(&self) -> Level {
-        self.pin.get_output_level()
-    }
-
-    /// Toggle pin output
-    #[inline]
-    pub fn toggle(&mut self) {
-        self.pin.toggle()
-    }
-}
-
-/// GPIO output type
-pub enum OutputType {
-    /// Drive the pin both high or low.
-    PushPull,
-    /// Drive the pin low, or don't drive it at all if the output level is high.
-    #[cfg(not(gpio_x0))]
-    OpenDrain,
-}
-
-impl From<OutputType> for AFType {
-    fn from(value: OutputType) -> Self {
-        match value {
-            #[cfg(not(gpio_x0))]
-            OutputType::OpenDrain => AFType::OutputOpenDrain,
-            OutputType::PushPull => AFType::OutputPushPull,
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum AFType {
-    /// Output, drive the pin both high or low.
-    OutputPushPull = 0b10,
-    /// Output, drive the pin low, or don't drive it at all if the output level is high.
-    #[cfg(not(gpio_x0))]
-    OutputOpenDrain = 0b11,
-}
-
-impl From<AFType> for vals::Cnf {
-    fn from(value: AFType) -> Self {
-        match value {
-            AFType::OutputPushPull => vals::Cnf::PULL_IN__AF_PUSH_PULL_OUT,
-            #[cfg(not(gpio_x0))]
-            AFType::OutputOpenDrain => vals::Cnf::AF_OPEN_DRAIN_OUT,
-        }
-    }
-}
-
-/// Alternate function type settings, CNF, when MODE>0b00
+// ============ Low-level pin trait ============
 
 pub(crate) trait SealedPin {
     fn pin_port(&self) -> u8;
 
     #[inline]
     fn _pin(&self) -> u8 {
-        self.pin_port() % 32
+        self.pin_port() & 0x1F
     }
+
     #[inline]
     fn _port(&self) -> u8 {
-        self.pin_port() / 32
+        self.pin_port() >> 5
     }
 
+    /// Get port base address
     #[inline]
-    fn block(&self) -> pac::gpio::Gpio {
-        pac::GPIO(self._port() as _)
+    fn port_base(&self) -> usize {
+        PIO_BASE + (self._port() as usize) * 0x24
     }
 
-    /// Set the output as high.
-    #[inline]
-    fn set_high(&self) {
-        let n = self._pin() as _;
-        #[cfg(not(gpio_x0))]
-        self.block().bshr().write(|w| w.set_bs(n, true));
-        #[cfg(gpio_x0)]
-        {
-            if n >= 16 {
-                self.block().bsxr().write(|w| w.set_bs(n - 16, true)); // extended BS
-            } else {
-                self.block().bshr().write(|w| w.set_bs(n, true));
-            }
-        }
-    }
-
-    /// Set the output as low.
-    #[inline]
-    fn set_low(&self) {
-        let n = self._pin() as _;
-        #[cfg(not(gpio_x0))]
-        self.block().bshr().write(|w| w.set_br(n, true));
-        #[cfg(gpio_x0)]
-        {
-            if n >= 16 {
-                self.block().bsxr().write(|w| w.set_br(n - 16, true)); // extended BS
-            } else {
-                self.block().bshr().write(|w| w.set_br(n, true));
-            }
-        }
-    }
-
-    #[inline]
-    fn set_mode_cnf(&self, mode: vals::Mode, cnf: vals::Cnf) {
+    /// Set pin mode (CFG register, 4 bits per pin)
+    fn set_mode(&self, mode: PinMode) {
         let pin = self._pin() as usize;
-        let block = self.block();
+        let cfg_reg = pin / 8; // CFG0-CFG3
+        let cfg_offset = (pin % 8) * 4;
+        let cfg_addr = self.port_base() + cfg_reg * 4;
 
-        match pin / 8 {
-            0 => {
-                block.cfglr().modify(|w| {
-                    w.set_cnf(pin % 8, cnf);
-                    w.set_mode(pin % 8, mode);
-                });
-            }
-            #[cfg(not(gpio_v0))]
-            1 => {
-                block.cfghr().modify(|w| {
-                    w.set_cnf(pin % 8, cnf);
-                    w.set_mode(pin % 8, mode);
-                });
-            }
-            // only for GPIO with 24 lines
-            #[cfg(gpio_x0)]
-            2 => {
-                block.cfgxr().modify(|w| {
-                    w.set_cnf(pin % 8, cnf);
-                    w.set_mode(pin % 8, mode);
-                });
-            }
-            _ => unreachable!(),
+        unsafe {
+            let reg = cfg_addr as *mut u32;
+            let val = reg.read_volatile();
+            let mask = !(0x7 << cfg_offset);
+            let new_val = (val & mask) | ((mode as u32) << cfg_offset);
+            reg.write_volatile(new_val);
         }
     }
 
-    #[inline]
-    fn set_as_output(&self, speed: Speed) {
-        self.set_mode_cnf(speed.into(), vals::Cnf::ANALOG_IN__PUSH_PULL_OUT);
-    }
-
-    #[inline]
-    fn set_as_input(&self, pull: Pull) {
-        self.set_mode_cnf(vals::Mode::INPUT, pull.into());
-        self.set_pull(pull);
-    }
-
-    #[inline]
+    /// Set pull configuration (PUL register, 2 bits per pin)
     fn set_pull(&self, pull: Pull) {
-        let pin = self._pin() as _;
+        let pin = self._pin() as usize;
+        let pull_reg = pin / 16; // PUL0 or PUL1
+        let pull_offset = (pin % 16) * 2;
+        let pull_addr = self.port_base() + 0x1C + pull_reg * 4;
 
-        match pull {
-            Pull::Up => self.block().outdr().modify(|w| w.set_odr(pin, true)),
-            Pull::Down => self.block().outdr().modify(|w| w.set_odr(pin, false)),
-            _ => {}
+        unsafe {
+            let reg = pull_addr as *mut u32;
+            let val = reg.read_volatile();
+            let mask = !(0x3 << pull_offset);
+            let new_val = (val & mask) | ((pull as u32) << pull_offset);
+            reg.write_volatile(new_val);
         }
     }
 
-    /// Only one type, alternate function + push pull
-    #[inline]
-    fn set_as_af_output(&self, af_type: AFType, speed: Speed) {
-        self.set_mode_cnf(speed.into(), af_type.into());
+    /// Set drive strength (DRV register, 2 bits per pin)
+    fn set_drive(&self, drive: DriveStrength) {
+        let pin = self._pin() as usize;
+        let drv_reg = pin / 16; // DRV0 or DRV1
+        let drv_offset = (pin % 16) * 2;
+        let drv_addr = self.port_base() + 0x14 + drv_reg * 4;
+
+        unsafe {
+            let reg = drv_addr as *mut u32;
+            let val = reg.read_volatile();
+            let mask = !(0x3 << drv_offset);
+            let new_val = (val & mask) | ((drive as u32) << drv_offset);
+            reg.write_volatile(new_val);
+        }
     }
 
-    /// Analog mode, both input and output
-    #[inline]
-    fn set_as_analog(&self) {
-        self.set_mode_cnf(vals::Mode::INPUT, vals::Cnf::ANALOG_IN__PUSH_PULL_OUT);
+    /// Read pin data (DATA register)
+    fn read_data(&self) -> bool {
+        let pin = self._pin() as usize;
+        let data_addr = self.port_base() + 0x10;
+
+        unsafe {
+            let reg = data_addr as *const u32;
+            (reg.read_volatile() >> pin) & 1 != 0
+        }
     }
 
-    /// Set the pin as "disconnected", ie doing nothing and consuming the lowest
-    /// amount of power possible.
-    ///
-    /// This is currently the same as set_as_analog but is semantically different really.
-    /// Drivers should set_as_disconnected pins when dropped.
-    #[inline]
-    fn set_as_disconnected(&self) {
-        self.set_as_analog();
+    /// Write pin data (DATA register)
+    fn write_data(&self, high: bool) {
+        let pin = self._pin() as usize;
+        let data_addr = self.port_base() + 0x10;
+
+        unsafe {
+            let reg = data_addr as *mut u32;
+            let val = reg.read_volatile();
+            let new_val = if high { val | (1 << pin) } else { val & !(1 << pin) };
+            reg.write_volatile(new_val);
+        }
     }
 }
 
+/// GPIO Pin trait
 #[allow(private_bounds)]
-pub trait Pin: PeripheralType + Into<AnyPin> + SealedPin + Sized + 'static {
-    type ExtiChannel: crate::exti::Channel;
-
-    /// Number of the pin within the port (0..31)
+pub trait Pin: PeripheralType + SealedPin + Sized + 'static {
     #[inline]
     fn pin(&self) -> u8 {
         self._pin()
     }
 
-    /// Port of the pin
     #[inline]
     fn port(&self) -> u8 {
         self._port()
     }
 
-    /// Convert from concrete pin type PX_XX to type erased `AnyPin`.
     #[inline]
     fn degrade(self) -> AnyPin {
         AnyPin {
@@ -611,7 +355,7 @@ pub trait Pin: PeripheralType + Into<AnyPin> + SealedPin + Sized + 'static {
     }
 }
 
-// Type-erased GPIO pin
+/// Type-erased GPIO pin
 pub struct AnyPin {
     pin_port: u8,
 }
@@ -621,18 +365,12 @@ impl AnyPin {
     pub unsafe fn steal(pin_port: u8) -> Self {
         Self { pin_port }
     }
-
-    #[inline]
-    fn _port(&self) -> u8 {
-        self.pin_port / 32
-    }
 }
 
 impl_peripheral!(AnyPin);
-impl Pin for AnyPin {
-    #[cfg(exti)]
-    type ExtiChannel = exti::AnyChannel;
-}
+
+impl Pin for AnyPin {}
+
 impl SealedPin for AnyPin {
     #[inline]
     fn pin_port(&self) -> u8 {
@@ -640,17 +378,16 @@ impl SealedPin for AnyPin {
     }
 }
 
+// ============ Generate pin implementations ============
+
 foreach_pin!(
-    ($pin_name:ident, $port_name:ident, $port_num:expr, $pin_num:expr, $exti_ch:ident) => {
-        impl Pin for peripherals::$pin_name {
-            #[cfg(exti)]
-            type ExtiChannel = peripherals::$exti_ch;
-        }
+    ($pin_name:ident, $port_name:ident, $port_num:expr, $pin_num:expr) => {
+        impl Pin for peripherals::$pin_name {}
 
         impl SealedPin for peripherals::$pin_name {
             #[inline]
             fn pin_port(&self) -> u8 {
-                $port_num * 32 + $pin_num
+                ($port_num << 5) | $pin_num
             }
         }
 
@@ -662,28 +399,17 @@ foreach_pin!(
     };
 );
 
-/// Enable the GPIO peripheral clock.
-
-pub(crate) unsafe fn init(_cs: CriticalSection) {
-    #[cfg(afio)]
-    <crate::peripherals::AFIO as crate::peripheral::SealedRccPeripheral>::enable_and_reset_with_cs(_cs);
-
-    crate::_generated::init_gpio();
-}
-
-// eh impls
+// ============ embedded-hal implementations ============
 
 impl<'d> embedded_hal::digital::ErrorType for Input<'d> {
     type Error = Infallible;
 }
 
 impl<'d> embedded_hal::digital::InputPin for Input<'d> {
-    #[inline]
     fn is_high(&mut self) -> Result<bool, Self::Error> {
         Ok((*self).is_high())
     }
 
-    #[inline]
     fn is_low(&mut self) -> Result<bool, Self::Error> {
         Ok((*self).is_low())
     }
@@ -694,92 +420,24 @@ impl<'d> embedded_hal::digital::ErrorType for Output<'d> {
 }
 
 impl<'d> embedded_hal::digital::OutputPin for Output<'d> {
-    #[inline]
     fn set_high(&mut self) -> Result<(), Self::Error> {
-        Ok(self.set_high())
+        self.set_high();
+        Ok(())
     }
 
-    #[inline]
     fn set_low(&mut self) -> Result<(), Self::Error> {
-        Ok(self.set_low())
+        self.set_low();
+        Ok(())
     }
 }
 
 impl<'d> embedded_hal::digital::StatefulOutputPin for Output<'d> {
-    #[inline]
     fn is_set_high(&mut self) -> Result<bool, Self::Error> {
         Ok((*self).is_set_high())
     }
 
-    /// Is the output pin set as low?
-    #[inline]
     fn is_set_low(&mut self) -> Result<bool, Self::Error> {
         Ok((*self).is_set_low())
-    }
-}
-
-impl<'d> embedded_hal::digital::ErrorType for OutputOpenDrain<'d> {
-    type Error = Infallible;
-}
-
-impl<'d> embedded_hal::digital::InputPin for OutputOpenDrain<'d> {
-    #[inline]
-    fn is_high(&mut self) -> Result<bool, Self::Error> {
-        Ok((*self).is_high())
-    }
-
-    #[inline]
-    fn is_low(&mut self) -> Result<bool, Self::Error> {
-        Ok((*self).is_low())
-    }
-}
-
-impl<'d> embedded_hal::digital::OutputPin for OutputOpenDrain<'d> {
-    #[inline]
-    fn set_high(&mut self) -> Result<(), Self::Error> {
-        Ok(self.set_high())
-    }
-
-    #[inline]
-    fn set_low(&mut self) -> Result<(), Self::Error> {
-        Ok(self.set_low())
-    }
-}
-
-impl<'d> embedded_hal::digital::StatefulOutputPin for OutputOpenDrain<'d> {
-    #[inline]
-    fn is_set_high(&mut self) -> Result<bool, Self::Error> {
-        Ok((*self).is_set_high())
-    }
-
-    /// Is the output pin set as low?
-    #[inline]
-    fn is_set_low(&mut self) -> Result<bool, Self::Error> {
-        Ok((*self).is_set_low())
-    }
-}
-
-impl<'d> embedded_hal::digital::InputPin for Flex<'d> {
-    #[inline]
-    fn is_high(&mut self) -> Result<bool, Self::Error> {
-        Ok((*self).is_high())
-    }
-
-    #[inline]
-    fn is_low(&mut self) -> Result<bool, Self::Error> {
-        Ok((*self).is_low())
-    }
-}
-
-impl<'d> embedded_hal::digital::OutputPin for Flex<'d> {
-    #[inline]
-    fn set_high(&mut self) -> Result<(), Self::Error> {
-        Ok(self.set_high())
-    }
-
-    #[inline]
-    fn set_low(&mut self) -> Result<(), Self::Error> {
-        Ok(self.set_low())
     }
 }
 
@@ -787,15 +445,34 @@ impl<'d> embedded_hal::digital::ErrorType for Flex<'d> {
     type Error = Infallible;
 }
 
-impl<'d> embedded_hal::digital::StatefulOutputPin for Flex<'d> {
-    #[inline]
-    fn is_set_high(&mut self) -> Result<bool, Self::Error> {
-        Ok((*self).is_set_high())
+impl<'d> embedded_hal::digital::InputPin for Flex<'d> {
+    fn is_high(&mut self) -> Result<bool, Self::Error> {
+        Ok((*self).is_high())
     }
 
-    /// Is the output pin set as low?
-    #[inline]
+    fn is_low(&mut self) -> Result<bool, Self::Error> {
+        Ok((*self).is_low())
+    }
+}
+
+impl<'d> embedded_hal::digital::OutputPin for Flex<'d> {
+    fn set_high(&mut self) -> Result<(), Self::Error> {
+        self.set_high();
+        Ok(())
+    }
+
+    fn set_low(&mut self) -> Result<(), Self::Error> {
+        self.set_low();
+        Ok(())
+    }
+}
+
+impl<'d> embedded_hal::digital::StatefulOutputPin for Flex<'d> {
+    fn is_set_high(&mut self) -> Result<bool, Self::Error> {
+        Ok(self.is_high())
+    }
+
     fn is_set_low(&mut self) -> Result<bool, Self::Error> {
-        Ok((*self).is_set_low())
+        Ok(self.is_low())
     }
 }

@@ -115,14 +115,6 @@ pin_trait!(Channel3ComplementaryPin, AdvancedInstance);
 
 pin_trait!(BreakInputPin, AdvancedInstance);
 
-// Update Event trigger DMA for every timer
-dma_trait!(UpDma, BasicInstance);
-
-dma_trait!(Ch1Dma, GeneralInstance16bit);
-dma_trait!(Ch2Dma, GeneralInstance16bit);
-dma_trait!(Ch3Dma, GeneralInstance16bit);
-dma_trait!(Ch4Dma, GeneralInstance16bit);
-
 #[allow(unused)]
 macro_rules! impl_core_timer {
     ($inst:ident, $bits:expr) => {
