@@ -1,118 +1,151 @@
-# ch32-hal
+# f1c100s-hal
 
-[![Demo Code Github Actions][badge-actions]][actions-build]
-
-[badge-actions]: https://img.shields.io/github/actions/workflow/status/ch32-rs/ch32-hal/build.yml?style=for-the-badge&label=Demo%20Code%20Build
-[actions-build]: https://github.com/ch32-rs/ch32-hal/actions/workflows/build.yml
-
-Rust HAL(Hardware Abstraction Layer) crate for WCH's 32-bit RISC-V microcontrollers.
+Rust HAL (Hardware Abstraction Layer) crate for Allwinner F1C100S/F1C200S ARM9 microcontrollers.
 
 > **Note**
-> This project is under development. While it's usable for experimentation and testing,
-> it may not be fully stable for production environments.
-> We welcome user feedback and encourage reporting any issues you encounter to help improve the hal crate.
+> 本项目正在开发中，从 [ch32-hal](https://github.com/ch32-rs/ch32-hal) 移植而来，适配 Allwinner F1C100S/F1C200S 系列芯片。
+> 欢迎反馈问题和贡献代码。
 
-This HAL crates is the [Embassy](https://github.com/embassy-rs/embassy) framework driver for WCH's 32-bit RISC-V microcontrollers.
+本 HAL 基于 [Embassy](https://github.com/embassy-rs/embassy) 框架设计，支持异步驱动。
 
-This HAL crates uses the metapac approach to support multiple chips in the same crate.
-The metapac is maintained in the [ch32-rs/ch32-data](https://github.com/ch32-rs/ch32-data) repository, published as a crate `ch32-metapac`.
+## 芯片特性
 
-Keypoints:
+F1C100S/F1C200S 是全志科技推出的低成本 ARM9 处理器：
 
-- Embassy support
-- All-in-one metapac for peripheral register access, check [ch32-data](https://github.com/ch32-rs/ch32-data) for more
-- All-in-one HAL crate, no need to create a new crate for each chip
-- Async drivers, with async/await support, DMA support
-- Write once, run on all supported chips(should be)
+- ARM926EJ-S 内核，五级流水线
+- 内置 32MB DDR1 (F1C100S) / 64MB DDR1 (F1C200S)
+- 支持 H.264/MPEG 视频解码，最高 720p@30fps
+- 内置音频编解码器，支持耳机输出
+- LCD RGB/i8080 接口，TV CVBS 输出
+- 丰富外设：USB OTG、UART×3、SPI×2、TWI×3、PWM×2 等
 
-## Supported Devices and Peripherals
+## 外设支持状态
 
-Currently, supported chips are listed in `Cargo.toml` as feature flags,
-others should work if you are careful as most peripherals are similar enough.
+| 外设 | 状态 | 说明 |
+|------|------|------|
+| GPIO | ✅ | PA(4), PB(4), PC(4), PD(22), PE(13), PF(6) |
+| CCU | ❌ | 时钟控制单元 |
+| UART | ❌ | 3路串口 |
+| SPI | ❌ | 2路 SPI |
+| TWI (I2C) | ❌ | 3路 I2C |
+| Timer | ❌ | 3路定时器 |
+| PWM | ❌ | 2路 PWM 输出 |
+| DMA | ❌ | 普通 DMA 和专用 DMA |
+| ADC | ❌ | KEYADC (6位) / TP (12位触摸屏) |
+| USB OTG | ❌ | USB 2.0 OTG |
+| SD/MMC | ❌ | SD/MMC 卡接口 |
+| Audio Codec | ❌ | 音频编解码器 |
+| Display | ❌ | LCD/TV 输出 |
+| CSI | ❌ | 摄像头接口 |
+| IR | ❌ | 红外遥控 |
 
-For a full list of chip capabilities and peripherals, check the [ch32-data](https://github.com/ch32-rs/ch32-data) repository.
+- ✅ 已完成
+- ❌ 待实现
 
-| Family      | V2/V3  | V1  | V0  | X0  | L1  | CH641  | CH643  |
-|-------------|--------|-----|-----|-----|-----|--------|--------|
-| Embassy     | ✅     | ✅  | ✅ | ✅  | ✅   | ✅      |        |
-| RCC         | ✅     | ✅  | ✅ | ✅  | ✅   | ✅      |        |
-| GPIO        | ✅     | ✅  | ✅ | ✅  | ✅   | ✅      |        |
-| UART*       | ✅     | ✅  | ✅ | ✅  | ✅   | ❓      |        |
-| SPI*        | ✅     | ✅  | ✅ | ✅  | ✅   | N/A    |        |
-| I2C         | ✅     | ✅  | ✅ | ❓  | ❓   | ❓      |        |
-| ADC         | ✅     | ✅  | ✅ | ✅  | ✅   | ✅      |        |
-| Timer(PWM)  | ✅     | ✅  | ✅ | ✅  | ✅   | ✅      |        |
-| USBD        | ✅*    | N/A  | N/A  | N/A  | N/A   | N/A      |        |
-| USB/OTG FS  | ✅*    | N/A  | N/A  | N/A  | N/A   | N/A      |        |
-| USB HS      | ✅*    | N/A  | N/A  | N/A  | N/A   | N/A      |        |
+## 快速开始
 
+### 环境准备
 
-- ✅ : Expected to work
-- ❌ : Not implemented
-- ❓ : Not tested
-- `*` marks the async driver
-- TODO: I haven't got a dev board yet, help-wanted
-- N/A: Not available
+1. 安装 Rust nightly 工具链：
+```bash
+rustup install nightly
+rustup component add rust-src --toolchain nightly
+```
 
-### Notes
-- For USB OTGFS and HS, look at the `mod.rs` respsectively to understand what is / is not tested.
+2. 安装 objcopy 工具（任选其一）：
+```bash
+# 方式1: ARM 工具链
+sudo apt install gcc-arm-none-eabi
 
-### Important: ROM/RAM Split Configuration (CH32V2/V3)
+# 方式2: LLVM
+sudo apt install llvm
 
-> **Warning**
-> All CH32V2 and CH32V3 series chips support configurable ROM/RAM split. The configuration is stored in
-> `FLASH_OBR.RAM_CODE_MOD` register (read-only at runtime, can only be modified via external tools).
->
-> If your program crashes immediately after flashing (e.g., Store Access Fault at stack addresses),
-> your chip's ROM/RAM configuration likely doesn't match the linker script.
+# 方式3: cargo-binutils
+cargo install cargo-binutils
+rustup component add llvm-tools-preview
+```
 
-**Symptoms:**
-- Program crashes with `mcause=0x7` (Store/AMO access fault)
-- Stack pointer (`sp`) points to invalid memory region
-- No output or immediate crash after reset
+3. 安装 sunxi-fel（用于烧录/调试）：
+```bash
+sudo apt install sunxi-tools
+```
 
-**Solution:**
-Use WCH's official tool (WCHISPTool) to configure the ROM/RAM split to match the default values defined in [ch32-data](https://github.com/ch32-rs/ch32-data).
+### 编译示例
 
-The linker script expects the **default RAM size** for each chip. Check your chip's YAML definition in ch32-data for the expected memory layout.
+```bash
+# 仅编译
+./build_boot.sh blinky
 
-### TODOs
+# 编译并通过 FEL 模式运行
+./build_boot.sh -r blinky
 
-This section lists some key items that are not implemented yet. And should be noted when using this crate.
+# 编译并烧录到 SPI Flash
+./build_boot.sh -f blinky
+```
 
-- PLL2 for CH32V3
-- DMA2 for CH32V3 (requires special handling of high DMA channels)
+编译产物：
+- `target/boot/blinky.bin` - 原始二进制
+- `target/boot/blinky_boot.bin` - 带 eGON.BT0 头的可启动镜像
 
-### Coming New Chips - Help Wanted
+### 示例代码
 
-- CH32V002 / CH32V004 / CH32V005 / CH32V006 / CH32V007 / CH32M007, Qingke V2C
-- CH645, USB HUB, SerDes (V4C)
-- CH564, USBHS, 100M Ethernet (V4J)
+```rust
+#![no_std]
+#![no_main]
 
-## Built with ch32-hal ✨
+use arm9_rt::entry;
+use hal::gpio::{DriveStrength, Level, Output};
+use {f1c100s_hal as hal, panic_halt as _};
 
-This is a list for awesome projects that are built using ch32-hal
+fn delay(count: u32) {
+    for _ in 0..count {
+        unsafe { core::arch::asm!("nop") };
+    }
+}
 
-- [Hackoween 2024 badge](https://github.com/rappet/hackoween-badge)
+#[entry]
+fn main() -> ! {
+    let p = hal::init(Default::default());
+    let mut led = Output::new(p.PE5, Level::Low, DriveStrength::default());
 
-## Minimum supported Rust version(MSRV)
+    loop {
+        led.toggle();
+        delay(100_000);
+    }
+}
+```
 
-This project is developed with a recent **nightly** version of Rust compiler. And is expected to work with beta versions of Rust.
+## FEL 模式
 
-Feel free to change this if you did some testing with some version of Rust.
+F1C100S 支持 FEL 模式进行开发调试：
 
-## Contributing
+1. 将芯片置于 FEL 模式（通常是 SD 卡槽为空时上电）
+2. 通过 USB 连接电脑
+3. 使用 `sunxi-fel` 工具下载运行代码
 
-All kinds of contributions are welcome.
+```bash
+# 检测设备
+sunxi-fel ver
 
-- Share your project at [Discussions](https://github.com/ch32-rs/ch32-hal/discussions)
-  - if your project is an open-source project, consider adding it to the list above
-- README and Documentation, including doc comments in code
-- Writing demo code for peripherals
-- Revising the peripheral definitions at [ch32-data](https://github.com/ch32-rs/ch32-data)
-- Adding new peripheral drivers - This is difficult to make it compatible with all chips, but you can try.
-- ...
+# 运行程序
+./build_boot.sh -r blinky
+```
+
+## 内存布局
+
+```
+0x00000000 - 0x00007FFF : 内置 32KB SRAM
+0x80000000 - 0x81FFFFFF : DDR1 (32MB, F1C100S)
+0x80000000 - 0x83FFFFFF : DDR1 (64MB, F1C200S)
+```
+
+当前 HAL 使用内置 SRAM 运行，DDR 需要先初始化 DRAM 控制器。
+
+## 依赖项目
+
+- [f1c100s-pac](https://github.com/apeng2012/f1c100s-pac) - 外设访问 crate
+- [arm9](https://github.com/apeng2012/arm9) - ARM9 运行时支持
 
 ## License
 
-This project is licensed under the MIT or Apache-2.0 license, at your option.
+MIT OR Apache-2.0

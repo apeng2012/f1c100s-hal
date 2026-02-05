@@ -41,6 +41,12 @@ pub mod mode {
 
 pub mod prelude;
 
+pub mod embassy;
+
+pub mod debug;
+
+pub mod usart;
+
 pub use crate::_generated::{peripherals, Peripherals};
 
 pub mod gpio;
@@ -71,14 +77,23 @@ impl Default for Config {
 ///
 /// This should only be called once at startup, otherwise it panics.
 pub fn init(_config: Config) -> Peripherals {
+
     let p = Peripherals::take();
 
     unsafe {
         crate::_generated::init_gpio();
     }
 
+    // Initialize Embassy time driver (AVS counter)
+    unsafe {
+        crate::embassy::init();
+    }
+
     p
 }
+
+// Note: disable_mmu_cache function was removed - it caused Timer issues
+// FEL mode behavior differs from Flash boot, use Flash mode for development
 
 #[macro_export]
 macro_rules! bind_interrupts {

@@ -17,18 +17,47 @@ embedded-hal = { version = "1.0" }
 
 critical-section = { version = "1.2.0" }
 defmt = { version = "0.3.8", optional = true }
+portable-atomic = { version = "1.10", features = ["critical-section"] }
 
 embassy-hal-internal = "0.3.0"
+embassy-sync = "0.6"
+embassy-time-driver = "0.2"
 
 [dev-dependencies]
 panic-halt = "1.0"
+embassy-executor = { version = "0.7", features = ["arch-spin", "executor-thread"], default-features = false }
+embassy-time = { version = "0.4", features = ["tick-hz-1_000_000"] }
+static_cell = "2"
 
 [build-dependencies]
 proc-macro2 = "1.0"
 quote = "1.0"
 
 [features]
-default = []
+default = ["time-driver-avs0", "debug-uart0"]
+
+## Internal feature for time driver
+_time-driver = []
+
+## Use AVS Counter 0 as time driver (default)
+time-driver-avs0 = ["_time-driver"]
+
+## Use AVS Counter 1 as time driver
+time-driver-avs1 = ["_time-driver"]
+
+## Internal feature for debug output
+_debug-output = []
+
+## Use UART0 for debug output (PE1=TX, PE0=RX) - default
+debug-uart0 = ["_debug-output"]
+
+## Use UART1 for debug output (PA3=TX, PA2=RX)
+debug-uart1 = ["_debug-output"]
+
+## Use UART2 for debug output (PE7=TX, PE8=RX)
+debug-uart2 = ["_debug-output"]
+
+## defmt support
 defmt = ["dep:defmt"]
 
 [[example]]

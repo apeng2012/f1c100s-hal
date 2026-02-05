@@ -1,81 +1,156 @@
-//! The debug module.
+//! Debug output module for F1C100S.
 //!
-//! See-also: https://github.com/openwch/ch32v003/blob/main/EVT/EXAM/SDI_Printf/SDI_Printf/Debug/debug.c
+//! Provides `print!` and `println!` macros for debug output via UART.
+//!
+//! # Features
+//! - `debug-uart0` - Use UART0 (PE1=TX, PE0=RX) - default
+//! - `debug-uart1` - Use UART1 (PA3=TX, PA2=RX)
+//! - `debug-uart2` - Use UART2 (PE7=TX, PE8=RX)
+//!
+//! If no debug feature is enabled, print!/println! are no-ops.
+//!
+//! Default baudrate: 115200 @ 6MHz APB clock
 
-use qingke::riscv;
+use core::fmt::{self, Write};
 
-#[cfg(any(qingke_v3, qingke_v4))]
-mod regs {
-    pub const DEBUG_DATA0_ADDRESS: *mut u32 = 0xE000_0380 as *mut u32;
-    pub const DEBUG_DATA1_ADDRESS: *mut u32 = 0xE000_0384 as *mut u32;
-}
+#[cfg(feature = "debug-uart0")]
+use f1c100s_pac::Uart0 as DebugUart;
+#[cfg(feature = "debug-uart1")]
+use f1c100s_pac::Uart1 as DebugUart;
+#[cfg(feature = "debug-uart2")]
+use f1c100s_pac::Uart2 as DebugUart;
 
-#[cfg(qingke_v2)]
-mod regs {
-    pub const DEBUG_DATA0_ADDRESS: *mut u32 = 0xE00000F4 as *mut u32;
-    pub const DEBUG_DATA1_ADDRESS: *mut u32 = 0xE00000F8 as *mut u32;
-}
+use f1c100s_pac::{Ccu, Pio};
 
-pub struct SDIPrint;
+/// Debug print output using UART
+pub struct DebugPrint;
 
-impl SDIPrint {
+impl DebugPrint {
+    /// Initialize UART for debug output (115200 baud, 8N1)
+    #[cfg(feature = "_debug-output")]
     pub fn enable() {
-        unsafe {
-            // Enable SDI print
-            core::ptr::write_volatile(regs::DEBUG_DATA0_ADDRESS, 0);
-            riscv::asm::delay(100000);
+        let ccu = unsafe { Ccu::steal() };
+        let pio = unsafe { Pio::steal() };
+        let uart = unsafe { DebugUart::steal() };
+        
+        // Enable UART clock gate and de-assert reset
+        #[cfg(feature = "debug-uart0")]
+        {
+            ccu.bus_clk_gating2().modify(|_, w| w.uart0_gating().set_bit());
+            ccu.bus_soft_rst2().modify(|_, w| w.uart0_rst().set_bit());
         }
+        #[cfg(feature = "debug-uart1")]
+        {
+            ccu.bus_clk_gating2().modify(|_, w| w.uart1_gating().set_bit());
+            ccu.bus_soft_rst2().modify(|_, w| w.uart1_rst().set_bit());
+        }
+        #[cfg(feature = "debug-uart2")]
+        {
+            ccu.bus_clk_gating2().modify(|_, w| w.uart2_gating().set_bit());
+            ccu.bus_soft_rst2().modify(|_, w| w.uart2_rst().set_bit());
+        }
+        
+        // Configure GPIO pins
+        #[cfg(feature = "debug-uart0")]
+        {
+            // PE0 (RX) and PE1 (TX) as UART0 function (Func 5)
+            pio.pe_cfg0().modify(|_, w| unsafe {
+                w.pe0_select().bits(5)
+                 .pe1_select().bits(5)
+            });
+        }
+        #[cfg(feature = "debug-uart1")]
+        {
+            // PA2 (RX) and PA3 (TX) as UART1 function (Func 5)
+            pio.pa_cfg0().modify(|_, w| unsafe {
+                w.pa2_select().bits(5)
+                 .pa3_select().bits(5)
+            });
+        }
+        #[cfg(feature = "debug-uart2")]
+        {
+            // PE7 (TX) and PE8 (RX) as UART2 function (Func 3)
+            pio.pe_cfg0().modify(|_, w| unsafe {
+                w.pe7_select().bits(3)
+            });
+            pio.pe_cfg1().modify(|_, w| unsafe {
+                w.pe8_select().bits(3)
+            });
+        }
+        
+        // Configure UART: 115200 baud, 8N1
+        // APB clock = 6MHz, divisor = 6000000 / (16 * 115200) ≈ 3
+        
+        // Set DLAB to access divisor latch
+        uart.lcr().write(|w| w.dlab().set_bit());
+        
+        // Set divisor (115200 @ 6MHz APB)
+        uart.dll().write(|w| unsafe { w.dll().bits(3) });
+        uart.dlh().write(|w| unsafe { w.dlh().bits(0) });
+        
+        // Clear DLAB, set 8N1 (8 data bits, no parity, 1 stop bit)
+        uart.lcr().write(|w| unsafe { w.dls().bits(3) });
+        
+        // Enable FIFO
+        uart.fcr().write(|w| w.fifoe().set_bit());
     }
-
+    
+    /// No-op when debug output is disabled
+    #[cfg(not(feature = "_debug-output"))]
+    pub fn enable() {}
+    
+    /// Write a single byte
+    #[cfg(feature = "_debug-output")]
     #[inline]
-    fn is_busy() -> bool {
-        unsafe { core::ptr::read_volatile(regs::DEBUG_DATA0_ADDRESS) != 0 }
+    fn write_byte(byte: u8) {
+        let uart = unsafe { DebugUart::steal() };
+        // Wait for TX FIFO not full (THRE bit)
+        while !uart.lsr().read().thre().bit() {}
+        uart.thr().write(|w| unsafe { w.data().bits(byte) });
     }
 }
 
-impl core::fmt::Write for SDIPrint {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let mut data = [0u8; 8];
-        for chunk in s.as_bytes().chunks(7) {
-            data[1..chunk.len() + 1].copy_from_slice(chunk);
-            data[0] = chunk.len() as u8;
-
-            // data1 is the last 4 bytes of data
-            let data1 = u32::from_le_bytes(data[4..].try_into().unwrap());
-            let data0 = u32::from_le_bytes(data[..4].try_into().unwrap());
-
-            while SDIPrint::is_busy() {}
-
-            unsafe {
-                core::ptr::write_volatile(regs::DEBUG_DATA1_ADDRESS, data1);
-                core::ptr::write_volatile(regs::DEBUG_DATA0_ADDRESS, data0);
+#[cfg(feature = "_debug-output")]
+impl Write for DebugPrint {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for byte in s.bytes() {
+            if byte == b'\n' {
+                DebugPrint::write_byte(b'\r');
             }
+            DebugPrint::write_byte(byte);
         }
-
         Ok(())
     }
 }
 
-#[macro_export]
-macro_rules! println {
-    ($($arg:tt)*) => {
-        {
-            use core::fmt::Write;
-            use core::writeln;
-
-            writeln!(&mut $crate::debug::SDIPrint, $($arg)*).unwrap();
-        }
+#[cfg(not(feature = "_debug-output"))]
+impl Write for DebugPrint {
+    fn write_str(&mut self, _s: &str) -> fmt::Result {
+        Ok(())
     }
 }
 
+/// Print to UART debug output
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => {
         {
             use core::fmt::Write;
-            use core::write;
+            let _ = write!(&mut $crate::debug::DebugPrint, $($arg)*);
+        }
+    }
+}
 
-            write!(&mut $crate::debug::SDIPrint, $($arg)*).unwrap();
+/// Print with newline to UART debug output
+#[macro_export]
+macro_rules! println {
+    () => {
+        $crate::print!("\n")
+    };
+    ($($arg:tt)*) => {
+        {
+            use core::fmt::Write;
+            let _ = writeln!(&mut $crate::debug::DebugPrint, $($arg)*);
         }
     }
 }

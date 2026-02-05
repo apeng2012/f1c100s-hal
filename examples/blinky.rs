@@ -1,32 +1,48 @@
-//! F1C100S Blinky Example
-//!
-//! 在 PE5 引脚上闪烁 LED
-
 #![no_std]
 #![no_main]
 
-use arm9_rt::entry;
-use hal::gpio::{DriveStrength, Level, Output};
-use {f1c100s_hal as hal, panic_halt as _};
+use embassy_executor::Spawner;
+use embassy_time::{Duration, Timer};
+use f1c100s_hal as hal;
+use hal::gpio::{AnyPin, Level, Output};
+use hal::Peri;
+use hal::println;
 
-// 简单延时循环
-#[inline(never)]
-fn delay(count: u32) {
-    for _ in 0..count {
-        unsafe { core::arch::asm!("nop") };
-    }
-}
-
-#[entry]
-fn main() -> ! {
-    let p = hal::init(Default::default());
-
-    let mut led = Output::new(p.PE5, Level::Low, DriveStrength::default());
+#[embassy_executor::task(pool_size = 3)]
+async fn blink(pin: Peri<'static, AnyPin>, interval_ms: u64) {
+    let mut led = Output::new(pin, Level::Low, Default::default());
+    let mut count = 0u32;
 
     loop {
         led.set_high();
-        delay(100_000);
+        println!("[blink] {} ON", count);
+        Timer::after(Duration::from_millis(interval_ms)).await;
         led.set_low();
-        delay(100_000);
+        println!("[blink] {} OFF", count);
+        Timer::after(Duration::from_millis(interval_ms)).await;
+        count += 1;
     }
+}
+
+#[embassy_executor::main(entry = "arm9_rt::entry")]
+async fn main(spawner: Spawner) -> ! {
+    hal::debug::DebugPrint::enable();
+    let p = hal::init(Default::default());
+
+    println!("\n=== F1C100S Embassy Blinky ===\n");
+
+    // Spawn blink task
+    spawner.spawn(blink(p.PE5.into(), 500)).unwrap();
+    println!("Blink task spawned");
+
+    loop {
+        Timer::after_millis(5000).await;
+        println!("[main] heartbeat");
+    }
+}
+
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    println!("PANIC: {:?}", info);
+    loop {}
 }
