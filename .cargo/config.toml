@@ -12,3 +12,4 @@ channel = "nightly"
 [unstable]
 build-std = ["core", "alloc"]
 build-std-features = ["compiler-builtins-mem"]
+json-target-spec = true

@@ -47,6 +47,8 @@ pub mod debug;
 
 pub mod rcc;
 
+pub mod dram;
+
 pub mod usart;
 
 pub use crate::_generated::{peripherals, Peripherals};

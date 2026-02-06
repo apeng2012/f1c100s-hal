@@ -34,7 +34,13 @@ proc-macro2 = "1.0"
 quote = "1.0"
 
 [features]
-default = ["time-driver-avs0", "debug-uart0"]
+default = ["time-driver-avs0", "debug-uart0", "f1c200s"]
+
+## Chip selection (pick one)
+## F1C100S: 32MB DDR1
+f1c100s = []
+## F1C200S: 64MB DDR1 (default)
+f1c200s = []
 
 ## Internal feature for time driver
 _time-driver = []
@@ -62,3 +68,6 @@ defmt = ["dep:defmt"]
 
 [[example]]
 name = "blinky"
+
+[[example]]
+name = "sdram_test"

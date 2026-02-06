@@ -139,7 +139,13 @@ sunxi-fel ver
 0x80000000 - 0x83FFFFFF : DDR1 (64MB, F1C200S)
 ```
 
-当前 HAL 使用内置 SRAM 运行，DDR 需要先初始化 DRAM 控制器。
+当前 HAL 使用内置 SRAM 运行，DDR 需要先调用 `dram::init()` 初始化 DRAM 控制器。
+
+默认芯片型号为 F1C200S (64MB DDR1)，如需 F1C100S (32MB DDR1)：
+```toml
+[dependencies]
+f1c100s-hal = { ..., default-features = false, features = ["time-driver-avs0", "debug-uart0", "f1c100s"] }
+```
 
 ## 依赖项目
 
