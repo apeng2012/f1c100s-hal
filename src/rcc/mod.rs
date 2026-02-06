@@ -1,30 +1,24 @@
 use crate::time::Hertz;
 
-const DEFAULT_FREQUENCY: Hertz = Hertz(8_000_000);
+mod f1c100s;
+pub use f1c100s::*;
+
+const HSE_FREQ: u32 = 24_000_000;
 
 static mut CLOCKS: Clocks = Clocks {
-    // Power on default
-    sysclk: DEFAULT_FREQUENCY,
-    hclk: DEFAULT_FREQUENCY,
-    pclk1: DEFAULT_FREQUENCY,
-    pclk2: DEFAULT_FREQUENCY,
-
-    pclk1_tim: DEFAULT_FREQUENCY,
-    pclk2_tim: DEFAULT_FREQUENCY,
+    sysclk: Hertz(HSE_FREQ),
+    hclk: Hertz(HSE_FREQ),
+    pclk: Hertz(HSE_FREQ),
 };
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct Clocks {
+    /// CPU / system clock
     pub sysclk: Hertz,
     /// AHB clock
     pub hclk: Hertz,
-    /// APB1 clock
-    pub pclk1: Hertz,
-    /// APB2 clock
-    pub pclk2: Hertz,
-
-    pub(crate) pclk1_tim: Hertz,
-    pub(crate) pclk2_tim: Hertz,
+    /// APB clock
+    pub pclk: Hertz,
 }
 
 #[inline]
@@ -32,102 +26,53 @@ pub fn clocks() -> &'static Clocks {
     unsafe { &CLOCKS }
 }
 
-#[cfg(ch32v0)]
-#[path = "v0.rs"]
-mod rcc_impl;
+/// Compute and cache clock frequencies from config.
+fn update_clocks(config: &Config) {
+    let sysclk = match config.cpu_src {
+        CpuClkSrc::Losc => 32_768,
+        CpuClkSrc::Osc24M => HSE_FREQ,
+        CpuClkSrc::PllCpu => config.pll_cpu.map(|p| p.freq_hz()).unwrap_or(HSE_FREQ),
+    };
 
-#[cfg(any(ch32v1, ch32l1))]
-#[path = "v1.rs"]
-mod rcc_impl;
+    let pll_periph_hz = config.pll_periph.map(|p| p.freq_hz()).unwrap_or(HSE_FREQ);
 
-#[cfg(any(ch32v2, ch32v3, ch32f2))]
-#[path = "v3.rs"]
-mod rcc_impl;
+    let ahb_pre = match config.ahb_pre_div {
+        AhbPreDiv::Div1 => 1u32,
+        AhbPreDiv::Div2 => 2,
+        AhbPreDiv::Div3 => 3,
+        AhbPreDiv::Div4 => 4,
+    };
+    let ahb_ratio = match config.ahb_div {
+        AhbDiv::Div1 => 1u32,
+        AhbDiv::Div2 => 2,
+        AhbDiv::Div4 => 4,
+        AhbDiv::Div8 => 8,
+    };
 
-#[cfg(ch32x0)]
-#[path = "x0.rs"]
-mod rcc_impl;
+    let ahb_input = match config.ahb_src {
+        AhbClkSrc::Losc => 32_768,
+        AhbClkSrc::Osc24M => HSE_FREQ,
+        AhbClkSrc::CpuClk => sysclk,
+        AhbClkSrc::PllPeriph => pll_periph_hz / ahb_pre,
+    };
+    let hclk = ahb_input / ahb_ratio;
 
-#[cfg(ch641)]
-#[path = "ch641.rs"]
-mod rcc_impl;
+    let apb_ratio = match config.apb_div {
+        ApbDiv::Div2 => 2u32,
+        ApbDiv::Div4 => 4,
+        ApbDiv::Div8 => 8,
+    };
+    let pclk = hclk / apb_ratio;
 
-pub use rcc_impl::*;
-
-#[cfg(not(ch32v208))]
-pub const LSI_FREQ: Hertz = Hertz(40_000);
-#[cfg(ch32v208)]
-pub const LSI_FREQ: Hertz = Hertz(32_768);
-
-#[allow(dead_code)]
-#[derive(Clone, Copy)]
-pub enum LseMode {
-    Oscillator, // (LseDrive),
-    Bypass,
-}
-
-pub struct LseConfig {
-    pub frequency: Hertz,
-    pub mode: LseMode,
-}
-
-pub enum RtcClockSource {
-    LSE,
-    LSI,
-    // HSE divided by 128
-    HSE,
-    DISABLE,
-}
-
-pub struct LsConfig {
-    pub rtc: RtcClockSource,
-    pub lsi: bool,
-    pub lse: Option<LseConfig>,
-}
-
-impl LsConfig {
-    pub const fn default_lse() -> Self {
-        Self {
-            rtc: RtcClockSource::LSE,
-            lse: Some(LseConfig {
-                frequency: Hertz(32_768),
-                mode: LseMode::Oscillator, // (LseDrive::MediumHigh),
-            }),
-            lsi: false,
-        }
-    }
-
-    pub const fn default_lsi() -> Self {
-        Self {
-            rtc: RtcClockSource::LSI,
-            lsi: true,
-            lse: None,
-        }
-    }
-
-    pub const fn off() -> Self {
-        Self {
-            rtc: RtcClockSource::DISABLE,
-            lsi: false,
-            lse: None,
-        }
-    }
-}
-
-impl Default for LsConfig {
-    fn default() -> Self {
-        Self::default_lsi()
-    }
-}
-
-// TODO: implement LS clock configuration
-#[allow(unused)]
-impl LsConfig {
-    pub(crate) fn init(&self) -> Option<Hertz> {
-        todo!()
+    unsafe {
+        CLOCKS = Clocks {
+            sysclk: Hertz(sysclk),
+            hclk: Hertz(hclk),
+            pclk: Hertz(pclk),
+        };
     }
 }
 
 pub unsafe fn init(config: Config) {
-    rcc_impl::init(config);
+    f1c100s::init(&config);
 }

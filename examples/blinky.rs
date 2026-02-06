@@ -5,8 +5,7 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use f1c100s_hal as hal;
 use hal::gpio::{AnyPin, Level, Output};
-use hal::Peri;
-use hal::println;
+use hal::{println, Peri};
 
 #[embassy_executor::task(pool_size = 3)]
 async fn blink(pin: Peri<'static, AnyPin>, interval_ms: u64) {
@@ -26,8 +25,19 @@ async fn blink(pin: Peri<'static, AnyPin>, interval_ms: u64) {
 
 #[embassy_executor::main(entry = "arm9_rt::entry")]
 async fn main(spawner: Spawner) -> ! {
-    hal::debug::DebugPrint::enable();
-    let p = hal::init(Default::default());
+    let mut config = hal::Config::default();
+    {
+        use hal::rcc::*;
+        config.rcc.pll_cpu = Some(PllCpu::freq_720mhz());
+        config.rcc.pll_periph = Some(PllPeriph::freq_600mhz());
+        config.rcc.pll_video = Some(PllVideo::freq_198mhz());
+        config.rcc.cpu_src = CpuClkSrc::PllCpu;
+        config.rcc.ahb_src = AhbClkSrc::PllPeriph;
+        config.rcc.ahb_pre_div = AhbPreDiv::Div3; // 600/3 = 200MHz
+        config.rcc.ahb_div = AhbDiv::Div1; // 200MHz
+        config.rcc.apb_div = ApbDiv::Div2; // 100MHz
+    }
+    let p = hal::init(config);
 
     println!("\n=== F1C100S Embassy Blinky ===\n");
 

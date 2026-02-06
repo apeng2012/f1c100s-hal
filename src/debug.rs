@@ -19,7 +19,6 @@ use f1c100s_pac::Uart0 as DebugUart;
 use f1c100s_pac::Uart1 as DebugUart;
 #[cfg(feature = "debug-uart2")]
 use f1c100s_pac::Uart2 as DebugUart;
-
 use f1c100s_pac::{Ccu, Pio};
 
 /// Debug print output using UART
@@ -27,12 +26,14 @@ pub struct DebugPrint;
 
 impl DebugPrint {
     /// Initialize UART for debug output (115200 baud, 8N1)
+    ///
+    /// Must be called after clock init so APB frequency is known.
     #[cfg(feature = "_debug-output")]
     pub fn enable() {
         let ccu = unsafe { Ccu::steal() };
         let pio = unsafe { Pio::steal() };
         let uart = unsafe { DebugUart::steal() };
-        
+
         // Enable UART clock gate and de-assert reset
         #[cfg(feature = "debug-uart0")]
         {
@@ -49,56 +50,62 @@ impl DebugPrint {
             ccu.bus_clk_gating2().modify(|_, w| w.uart2_gating().set_bit());
             ccu.bus_soft_rst2().modify(|_, w| w.uart2_rst().set_bit());
         }
-        
+
         // Configure GPIO pins
         #[cfg(feature = "debug-uart0")]
         {
             // PE0 (RX) and PE1 (TX) as UART0 function (Func 5)
-            pio.pe_cfg0().modify(|_, w| unsafe {
-                w.pe0_select().bits(5)
-                 .pe1_select().bits(5)
-            });
+            pio.pe_cfg0()
+                .modify(|_, w| unsafe { w.pe0_select().bits(5).pe1_select().bits(5) });
         }
         #[cfg(feature = "debug-uart1")]
         {
             // PA2 (RX) and PA3 (TX) as UART1 function (Func 5)
-            pio.pa_cfg0().modify(|_, w| unsafe {
-                w.pa2_select().bits(5)
-                 .pa3_select().bits(5)
-            });
+            pio.pa_cfg0()
+                .modify(|_, w| unsafe { w.pa2_select().bits(5).pa3_select().bits(5) });
         }
         #[cfg(feature = "debug-uart2")]
         {
             // PE7 (TX) and PE8 (RX) as UART2 function (Func 3)
-            pio.pe_cfg0().modify(|_, w| unsafe {
-                w.pe7_select().bits(3)
-            });
-            pio.pe_cfg1().modify(|_, w| unsafe {
-                w.pe8_select().bits(3)
-            });
+            pio.pe_cfg0().modify(|_, w| unsafe { w.pe7_select().bits(3) });
+            pio.pe_cfg1().modify(|_, w| unsafe { w.pe8_select().bits(3) });
         }
-        
+
         // Configure UART: 115200 baud, 8N1
-        // APB clock = 6MHz, divisor = 6000000 / (16 * 115200) ≈ 3
-        
+        // Following the C reference sys_uart_init() sequence:
+
+        // Disable all interrupts
+        uart.ier().write(|w| unsafe { w.bits(0) });
+        // Reset and enable FIFO (RCVR trigger = 14 bytes)
+        uart.fcr().write(|w| unsafe { w.bits(0xf7) });
+        // Clear MCR
+        uart.mcr().write(|w| unsafe { w.bits(0) });
+
+        // Divisor = APB_CLK / (16 * 115200)
+        let apb_hz = crate::rcc::clocks().pclk.0;
+        let divisor = (apb_hz + 8 * 115200) / (16 * 115200);
+
         // Set DLAB to access divisor latch
-        uart.lcr().write(|w| w.dlab().set_bit());
-        
-        // Set divisor (115200 @ 6MHz APB)
-        uart.dll().write(|w| unsafe { w.dll().bits(3) });
-        uart.dlh().write(|w| unsafe { w.dlh().bits(0) });
-        
-        // Clear DLAB, set 8N1 (8 data bits, no parity, 1 stop bit)
-        uart.lcr().write(|w| unsafe { w.dls().bits(3) });
-        
-        // Enable FIFO
-        uart.fcr().write(|w| w.fifoe().set_bit());
+        uart.lcr().modify(|r, w| unsafe { w.bits(r.bits() | (1 << 7)) });
+
+        // Write divisor
+        uart.dll().write(|w| unsafe { w.dll().bits(divisor as u8) });
+        uart.dlh().write(|w| unsafe { w.dlh().bits((divisor >> 8) as u8) });
+
+        // Clear DLAB
+        uart.lcr().modify(|r, w| unsafe { w.bits(r.bits() & !(1 << 7)) });
+
+        // Set 8N1: 8 data bits (DLS=3), no parity, 1 stop bit
+        uart.lcr().modify(|r, w| unsafe {
+            let v = (r.bits() & !0x1f) | 0x03; // DLS=3, STOP=0, PEN=0
+            w.bits(v)
+        });
     }
-    
+
     /// No-op when debug output is disabled
     #[cfg(not(feature = "_debug-output"))]
     pub fn enable() {}
-    
+
     /// Write a single byte
     #[cfg(feature = "_debug-output")]
     #[inline]

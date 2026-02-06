@@ -45,6 +45,8 @@ pub mod embassy;
 
 pub mod debug;
 
+pub mod rcc;
+
 pub mod usart;
 
 pub use crate::_generated::{peripherals, Peripherals};
@@ -62,12 +64,14 @@ pub(crate) mod _generated {
 }
 
 pub struct Config {
-    // TODO: add CCU config
+    pub rcc: rcc::Config,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self {}
+        Self {
+            rcc: rcc::Config::default(),
+        }
     }
 }
 
@@ -76,7 +80,14 @@ impl Default for Config {
 /// This returns the peripheral singletons that can be used for creating drivers.
 ///
 /// This should only be called once at startup, otherwise it panics.
-pub fn init(_config: Config) -> Peripherals {
+pub fn init(config: Config) -> Peripherals {
+    // Initialize clock tree (CCU)
+    unsafe {
+        rcc::init(config.rcc);
+    }
+
+    // Initialize debug UART (must be after clock init for correct baud rate)
+    debug::DebugPrint::enable();
 
     let p = Peripherals::take();
 
