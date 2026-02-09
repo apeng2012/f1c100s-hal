@@ -9,8 +9,6 @@ pub use f1c100s_pac as pac;
 // This must go FIRST so that all the other modules see its macros.
 include!(concat!(env!("OUT_DIR"), "/_macros.rs"));
 
-pub(crate) mod internal;
-
 mod macros;
 
 pub mod time;
@@ -49,7 +47,11 @@ pub mod rcc;
 
 pub mod dram;
 
-pub mod usart;
+pub mod intc;
+
+pub mod interrupt;
+
+pub mod exti;
 
 pub use crate::_generated::{peripherals, Peripherals};
 
@@ -97,9 +99,39 @@ pub fn init(config: Config) -> Peripherals {
         crate::_generated::init_gpio();
     }
 
+    // Initialize INTC (must be before any interrupt users)
+    unsafe {
+        intc::init();
+    }
+
+    // Copy vector table to 0x00000000 so ARM9 exception vectors work.
+    // The linker places __vector_table after the boot header (0x30+),
+    // but ARM9 always fetches exceptions from 0x00000000.
+    unsafe {
+        extern "C" {
+            static __vector_table: u32;
+        }
+        let src = &__vector_table as *const u32;
+        let dst = 0x0000_0000 as *mut u32;
+        // Vector table is 8 entries (ldr pc, xxx) + 8 addresses = 64 bytes = 16 words
+        for i in 0..16 {
+            dst.add(i).write_volatile(src.add(i).read_volatile());
+        }
+    }
+
+    // Initialize EXTI (GPIO external interrupts)
+    unsafe {
+        exti::init();
+    }
+
     // Initialize Embassy time driver (AVS counter)
     unsafe {
         crate::embassy::init();
+    }
+
+    // Enable ARM9 IRQ (clear I bit in CPSR)
+    unsafe {
+        arm9::interrupt::enable();
     }
 
     p
@@ -113,5 +145,34 @@ macro_rules! bind_interrupts {
     ($vis:vis struct $name:ident { $($irq:ident => $($handler:ty),*;)* }) => {
         #[derive(Copy, Clone)]
         $vis struct $name;
+
+        $(
+            $(
+                unsafe impl $crate::interrupt::typelevel::Binding<$crate::interrupt::typelevel::$irq, $handler> for $name {}
+            )*
+        )*
+
+        // Register all handlers at link time via a constructor-like init function.
+        // The user must call the generated `_bind_interrupts_init` or rely on HAL init.
+        impl $name {
+            /// Register all bound interrupt handlers into the INTC dispatch table.
+            ///
+            /// # Safety
+            /// Must be called after INTC init and before interrupts are enabled.
+            #[allow(unused)]
+            pub unsafe fn init() {
+                $(
+                    $crate::intc::set_irq_handler(
+                        $crate::interrupt::Interrupt::$irq.number(),
+                        || {
+                            $(
+                                <$handler as $crate::interrupt::typelevel::Handler<$crate::interrupt::typelevel::$irq>>::on_interrupt();
+                            )*
+                        },
+                    );
+                    $crate::intc::enable_irq($crate::interrupt::Interrupt::$irq.number());
+                )*
+            }
+        }
     };
 }
