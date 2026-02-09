@@ -71,3 +71,6 @@ name = "blinky"
 
 [[example]]
 name = "sdram_test"
+
+[[example]]
+name = "spi_flash"

@@ -34,6 +34,8 @@ fn main() {
     singletons.push("UART0".to_string());
     singletons.push("UART1".to_string());
     singletons.push("UART2".to_string());
+    singletons.push("SPI0".to_string());
+    singletons.push("SPI1".to_string());
 
     // _generated.rs
     let mut g = TokenStream::new();

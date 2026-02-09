@@ -57,6 +57,8 @@ pub use crate::_generated::{peripherals, Peripherals};
 
 pub mod gpio;
 
+pub mod spi;
+
 // This must go last, so that it sees all the impl_foo! macros defined earlier.
 pub(crate) mod _generated {
     #![allow(dead_code)]
