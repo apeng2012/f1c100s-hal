@@ -91,11 +91,19 @@ fn main() {
     let out_file = out_dir.join("_macros.rs").to_string_lossy().to_string();
     fs::write(out_file, m).unwrap();
 
-    // memory.x 由用户项目提供，arm9-rt 的 link.x 会 INCLUDE 它
-    // 这里只添加搜索路径
+    // 根据 spl feature 选择内存布局，生成 memory.x 到 OUT_DIR
+    // arm9-rt 的 link.x 会 INCLUDE memory.x
+    let memory_x_content = if env::var("CARGO_FEATURE_SPL").is_ok() {
+        include_str!("memory-spl.x")
+    } else {
+        include_str!("memory-default.x")
+    };
+    fs::write(out_dir.join("memory.x"), memory_x_content).unwrap();
     println!("cargo:rustc-link-search={}", out_dir.display());
 
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=memory-default.x");
+    println!("cargo:rerun-if-changed=memory-spl.x");
 }
 
 fn make_table(out: &mut String, name: &str, data: &Vec<Vec<String>>) {

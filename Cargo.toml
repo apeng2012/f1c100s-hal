@@ -63,6 +63,10 @@ debug-uart1 = ["_debug-output"]
 ## Use UART2 for debug output (PE7=TX, PE8=RX)
 debug-uart2 = ["_debug-output"]
 
+## SPL boot mode: SPL initializes SDRAM, program runs from SDRAM
+## Use with f1c100s-spl_uart0.bin as first-stage bootloader
+spl = []
+
 ## defmt support
 defmt = ["dep:defmt"]
 

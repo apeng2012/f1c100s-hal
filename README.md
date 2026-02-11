@@ -70,13 +70,19 @@ rustup component add llvm-tools-preview
 sudo apt install sunxi-tools
 ```
 
-### 编译示例
+### 编译与下载
+
+项目提供统一的构建脚本 `build_boot.sh`，支持两种启动模式：
+
+#### SPL 模式（默认，推荐）
+
+SPL（`f1c100s-spl_uart0.bin`）先初始化时钟、SDRAM、MMU，主程序运行在 SDRAM 中，可用空间充足（代码 32MB + 数据 32MB）。
 
 ```bash
 # 仅编译
 ./build_boot.sh blinky
 
-# 编译并通过 FEL 模式运行
+# 编译并通过 FEL 模式运行（开发调试推荐）
 ./build_boot.sh -r blinky
 
 # 编译并烧录到 SPI Flash
@@ -84,38 +90,28 @@ sudo apt install sunxi-tools
 ```
 
 编译产物：
-- `target/boot/blinky.bin` - 原始二进制
-- `target/boot/blinky_boot.bin` - 带 eGON.BT0 头的可启动镜像
+- `target/boot/blinky_spl.bin` — 主程序二进制（加载到 SDRAM 0x80008000）
+- `target/boot/blinky_flash.bin` — SPI Flash 完整镜像（SPL + uImage）
 
-### 示例代码
+#### Direct 模式（-d）
 
-```rust
-#![no_std]
-#![no_main]
+程序直接运行在 32KB 内置 SRAM 中，带 eGON.BT0 启动头。空间受限（24KB 代码 + 8KB 数据），适用于极简场景。不支持 FEL 运行。
 
-use arm9_rt::entry;
-use hal::gpio::{DriveStrength, Level, Output};
-use {f1c100s_hal as hal, panic_halt as _};
+```bash
+# 仅编译
+./build_boot.sh -d blinky
 
-fn delay(count: u32) {
-    for _ in 0..count {
-        unsafe { core::arch::asm!("nop") };
-    }
-}
-
-#[entry]
-fn main() -> ! {
-    let p = hal::init(Default::default());
-    let mut led = Output::new(p.PE5, Level::Low, DriveStrength::default());
-
-    loop {
-        led.toggle();
-        delay(100_000);
-    }
-}
+# 编译并烧录到 SPI Flash
+./build_boot.sh -d -f blinky
 ```
 
-## FEL 模式
+编译产物：
+- `target/boot/blinky.bin` — 原始二进制
+- `target/boot/blinky_boot.bin` — 带 eGON.BT0 头的可启动镜像
+
+> **注意：** `-d` 和 `-r` 不能同时使用，Direct 模式下 FEL 运行不可用。
+
+### FEL 模式
 
 F1C100S 支持 FEL 模式进行开发调试：
 
@@ -127,19 +123,64 @@ F1C100S 支持 FEL 模式进行开发调试：
 # 检测设备
 sunxi-fel ver
 
-# 运行程序
+# 编译并运行（SPL 模式）
 ./build_boot.sh -r blinky
+```
+
+FEL 模式下的执行流程：
+1. `sunxi-fel spl` 将 SPL 写入 SRAM 并执行
+2. SPL 初始化时钟、DRAM、MMU 后返回 FEL
+3. `sunxi-fel write` 将主程序写入 SDRAM
+4. `sunxi-fel exe` 跳转执行主程序
+
+### 示例代码
+
+```rust
+#![no_std]
+#![no_main]
+
+use embassy_executor::Spawner;
+use embassy_time::{Duration, Timer};
+use f1c100s_hal as hal;
+use hal::gpio::{AnyPin, Level, Output};
+use hal::{println, Peri};
+
+#[embassy_executor::main(entry = "arm9_rt::entry")]
+async fn main(_spawner: Spawner) -> ! {
+    let p = hal::init(Default::default());
+    let mut led = Output::new(p.PE5.into(), Level::Low, Default::default());
+
+    loop {
+        led.toggle();
+        println!("[blink] toggle");
+        Timer::after(Duration::from_millis(500)).await;
+    }
+}
+
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    println!("PANIC: {:?}", info);
+    loop {}
+}
 ```
 
 ## 内存布局
 
+### SPL 模式（默认）
+
 ```
-0x00000000 - 0x00007FFF : 内置 32KB SRAM
-0x80000000 - 0x81FFFFFF : DDR1 (32MB, F1C100S)
-0x80000000 - 0x83FFFFFF : DDR1 (64MB, F1C200S)
+0x00000000 - 0x00007FFF : 32KB SRAM (向量表拷贝至此)
+0x80000000 - 0x80007FFF : SPL 页表区域 (TTB, 由 SPL 管理)
+0x80008000 - 0x81FFFFFF : SDRAM 代码区 (FLASH, ~32MB)
+0x82000000 - 0x83FFFFFF : SDRAM 数据区 (RAM, 32MB)
 ```
 
-当前 HAL 使用内置 SRAM 运行，DDR 需要先调用 `dram::init()` 初始化 DRAM 控制器。
+### Direct 模式
+
+```
+0x00000000 - 0x00005FFF : 24KB SRAM 代码区 (FLASH)
+0x00006000 - 0x00007FFF : 8KB SRAM 数据区 (RAM)
+```
 
 默认芯片型号为 F1C200S (64MB DDR1)，如需 F1C100S (32MB DDR1)：
 ```toml
@@ -147,10 +188,23 @@ sunxi-fel ver
 f1c100s-hal = { ..., default-features = false, features = ["time-driver-avs0", "debug-uart0", "f1c100s"] }
 ```
 
+## Cargo Features
+
+| Feature | 默认 | 说明 |
+|---------|------|------|
+| `f1c200s` | ✅ | F1C200S 64MB DDR1 |
+| `f1c100s` | | F1C100S 32MB DDR1 |
+| `spl` | | SPL 启动模式，程序运行在 SDRAM（由 build_boot.sh 自动启用） |
+| `debug-uart0` | ✅ | UART0 调试输出 (PE1=TX, PE0=RX) |
+| `debug-uart1` | | UART1 调试输出 (PA3=TX, PA2=RX) |
+| `debug-uart2` | | UART2 调试输出 (PE7=TX, PE8=RX) |
+| `time-driver-avs0` | ✅ | AVS Counter 0 作为时间驱动 |
+| `defmt` | | defmt 日志支持 |
+
 ## 依赖项目
 
-- [f1c100s-pac](https://github.com/apeng2012/f1c100s-pac) - 外设访问 crate
-- [arm9](https://github.com/apeng2012/arm9) - ARM9 运行时支持
+- [f1c100s-pac](https://github.com/apeng2012/f1c100s-pac) — 外设访问 crate
+- [arm9](https://github.com/apeng2012/arm9) — ARM9 运行时支持
 
 ## License
 

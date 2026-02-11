@@ -11,3 +11,6 @@ MEMORY
     /* 如果需要使用 DDR，需要先初始化 DRAM 控制器 */
     /* DRAM : ORIGIN = 0x80000000, LENGTH = 32M */
 }
+
+/* F1C100S 从 SPI/SD 直接启动需要 eGON.BT0 header (0x30 字节) */
+_boot_header_size = 0x30;
