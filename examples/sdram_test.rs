@@ -83,18 +83,24 @@ async fn main(_spawner: Spawner) -> ! {
 
     println!("\n=== SDRAM Test ===\n");
 
-    println!("Init DRAM...");
-    match hal::dram::init() {
-        Some(info) => {
-            println!("OK {}MB", info.size_mb);
-        }
-        None => {
-            println!("FAIL!");
-            loop {
-                Timer::after(Duration::from_secs(1)).await;
+    #[cfg(not(feature = "spl"))]
+    {
+        println!("Init DRAM...");
+        match hal::dram::init() {
+            Some(info) => {
+                println!("OK {}MB", info.size_mb);
+            }
+            None => {
+                println!("FAIL!");
+                loop {
+                    Timer::after(Duration::from_secs(1)).await;
+                }
             }
         }
     }
+
+    #[cfg(feature = "spl")]
+    println!("SPL mode: DRAM already initialized by bootloader");
 
     // Test 1: Walking ones
     let r = unsafe { test_walk1(SDRAM_BASE) };

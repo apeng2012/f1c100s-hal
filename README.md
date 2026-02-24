@@ -26,11 +26,11 @@ F1C100S/F1C200S 是全志科技推出的低成本 ARM9 处理器：
 | GPIO | ✅ | PA(4), PB(4), PC(4), PD(22), PE(13), PF(6) |
 | CCU | ❌ | 时钟控制单元 |
 | UART | ❌ | 3路串口 |
-| SPI | ❌ | 2路 SPI |
+| SPI | ✅ | 2路 SPI，支持 DMA 异步传输 |
 | TWI (I2C) | ❌ | 3路 I2C |
 | Timer | ❌ | 3路定时器 |
 | PWM | ❌ | 2路 PWM 输出 |
-| DMA | ❌ | 普通 DMA 和专用 DMA |
+| DMA | ✅ | NDMA 4通道，支持 SPI/UART 等外设 |
 | ADC | ❌ | KEYADC (6位) / TP (12位触摸屏) |
 | USB OTG | ❌ | USB 2.0 OTG |
 | SD/MMC | ❌ | SD/MMC 卡接口 |

@@ -348,6 +348,14 @@ pub(crate) unsafe fn init(config: &Config) {
         sdelay(100);
     }
 
+    // 6b. In SPL mode, ensure SDRAM bus clock gating and reset are properly set.
+    // The SPL bootloader sets these, but we re-assert them defensively.
+    #[cfg(feature = "spl")]
+    {
+        ccu.bus_clk_gating0().modify(|_, w| w.sdram_gating().set_bit());
+        ccu.bus_soft_rst0().modify(|_, w| w.sdram_rst().set_bit());
+    }
+
     // 7. Configure PLL_CPU
     if let Some(pll_cpu) = &config.pll_cpu {
         ccu.pll_cpu_ctrl().modify(|_, w| {

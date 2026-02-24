@@ -74,5 +74,12 @@ fn update_clocks(config: &Config) {
 }
 
 pub unsafe fn init(config: Config) {
+    #[cfg(feature = "spl")]
+    {
+        // In SPL mode, the SPL bootloader has already initialized PLLs and bus clocks.
+        // We still re-configure them here so the HAL has full control and the clock
+        // tracking matches reality.  This is safe — re-programming the same PLL values
+        // is a no-op, and switching to a different config is fine too.
+    }
     f1c100s::init(&config);
 }

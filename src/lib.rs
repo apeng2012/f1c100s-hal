@@ -57,6 +57,8 @@ pub use crate::_generated::{peripherals, Peripherals};
 
 pub mod gpio;
 
+pub mod dma;
+
 pub mod spi;
 
 // This must go last, so that it sees all the impl_foo! macros defined earlier.
@@ -95,6 +97,16 @@ pub fn init(config: Config) -> Peripherals {
     // Initialize debug UART (must be after clock init for correct baud rate)
     debug::DebugPrint::enable();
 
+    println!(
+        "[hal] clock init done, sysclk={}Hz, hclk={}Hz, pclk={}Hz",
+        rcc::clocks().sysclk.0,
+        rcc::clocks().hclk.0,
+        rcc::clocks().pclk.0
+    );
+
+    #[cfg(feature = "spl")]
+    println!("[hal] SPL mode: program running from SDRAM");
+
     let p = Peripherals::take();
 
     unsafe {
@@ -107,8 +119,8 @@ pub fn init(config: Config) -> Peripherals {
     }
 
     // Copy vector table to 0x00000000 so ARM9 exception vectors work.
-    // The linker places __vector_table after the boot header (0x30+),
-    // but ARM9 always fetches exceptions from 0x00000000.
+    // ARM9 always fetches exceptions from 0x00000000, regardless of where
+    // the program is loaded (SRAM or SDRAM).
     unsafe {
         extern "C" {
             static __vector_table: u32;
@@ -119,6 +131,12 @@ pub fn init(config: Config) -> Peripherals {
         for i in 0..16 {
             dst.add(i).write_volatile(src.add(i).read_volatile());
         }
+        println!("[hal] vector table copied to 0x0 (src={:#010X})", src as u32);
+    }
+
+    // Initialize DMA controller
+    unsafe {
+        dma::init();
     }
 
     // Initialize EXTI (GPIO external interrupts)

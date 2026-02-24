@@ -78,3 +78,6 @@ name = "sdram_test"
 
 [[example]]
 name = "spi_flash"
+
+[[example]]
+name = "spi_flash_dma"
