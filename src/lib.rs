@@ -61,6 +61,8 @@ pub mod dma;
 
 pub mod spi;
 
+pub mod display;
+
 // This must go last, so that it sees all the impl_foo! macros defined earlier.
 pub(crate) mod _generated {
     #![allow(dead_code)]

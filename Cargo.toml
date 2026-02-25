@@ -81,3 +81,6 @@ name = "spi_flash"
 
 [[example]]
 name = "spi_flash_dma"
+
+[[example]]
+name = "lcd_lines"
